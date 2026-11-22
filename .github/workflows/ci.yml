@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify-guards:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check bash syntax & line endings
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x bin/*.sh hooks/*.sh tests/*.sh
+          for f in bin/*.sh hooks/*.sh tests/*.sh; do
+            if LC_ALL=C grep -q $'\r' "$f"; then
+              echo "CRLF detected in $f" >&2
+              exit 1
+            fi
+            bash -n "$f"
+          done
+
+      - name: Run end-to-end guard test suite
+        shell: bash
+        run: ./tests/run_tests.sh
