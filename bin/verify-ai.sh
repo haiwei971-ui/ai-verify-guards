@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 # verify-ai.sh — Shell-level verification guards for AI coding agent output.
+# Version: 1.1.0
 # Trust the shell, not the summary.
 
 set -euo pipefail
 
+VERSION="1.1.0"
+
 usage() {
-  cat <<'EOF'
+  cat <<EOF
+ai-verify-guards v${VERSION}
 Usage: verify-ai.sh <command> [args...]
 
 Commands:
   script <file>                       Check shell syntax (bash -n) and hidden CRLF (\r) endings
   json <file>                         Validate strict JSON (rejects syntax errors, NaN, Infinity)
+  py-test <file.py>                   Catch Python test tautologies (missing parens on mock.assert_called*, assert tuple)
   diff-dirs <src_dir> <dst_dir>       List files present in src_dir but missing from dst_dir
   regex <pattern> [flags]             Test regex with --must-match <str> and --must-reject <str>
-  run-strict <shell_command>          Run a command under `set -o pipefail` so pipes cannot mask failures
+  run-strict <shell_command>          Run a command under 'set -o pipefail' so pipes cannot mask failures
+  --version                           Print version
 EOF
 }
 
@@ -64,6 +70,71 @@ except Exception as exc:
     sys.exit(1)
 
 print(f"[PASS] Strict JSON valid: {path}")
+PY
+}
+
+cmd_py_test() {
+  local target="${1:-}"
+  if [[ -z "$target" || ! -f "$target" ]]; then
+    echo "[FAIL] Python file not found: ${target:-<missing>}" >&2
+    return 2
+  fi
+
+  python3 - "$target" <<'PY'
+import ast, sys
+
+path = sys.argv[1]
+try:
+    source = open(path, "r", encoding="utf-8").read()
+    tree = ast.parse(source, filename=path)
+except SyntaxError as exc:
+    print(f"[FAIL] Python syntax error in {path}:{exc.lineno}: {exc.msg}", file=sys.stderr)
+    sys.exit(1)
+
+MOCK_METHODS = {
+    "assert_called",
+    "assert_called_once",
+    "assert_called_with",
+    "assert_called_once_with",
+    "assert_any_call",
+    "assert_has_calls",
+    "assert_not_called",
+    "assert_awaited",
+    "assert_awaited_once",
+    "assert_awaited_with",
+    "assert_awaited_once_with",
+    "assert_any_await",
+    "assert_has_awaits",
+    "assert_not_awaited",
+}
+
+issues = []
+for node in ast.walk(tree):
+    if isinstance(node, ast.Assert):
+        t = node.test
+        if isinstance(t, ast.Attribute) and (t.attr in MOCK_METHODS or t.attr.startswith("assert_")):
+            issues.append(
+                f"{path}:{node.lineno}: Tautological mock assertion 'assert ...{t.attr}' without '()' (bound method is always truthy)"
+            )
+        elif isinstance(t, ast.Tuple) and len(t.elts) > 0:
+            issues.append(
+                f"{path}:{node.lineno}: Tautological 'assert (...)' on non-empty tuple literal (always truthy in Python)"
+            )
+        elif isinstance(t, ast.Constant) and t.value is True:
+            issues.append(f"{path}:{node.lineno}: Tautological 'assert True' checks nothing")
+    elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Attribute):
+        attr = node.value.attr
+        if attr in MOCK_METHODS:
+            issues.append(
+                f"{path}:{node.lineno}: Bare '{attr}' attribute access without '()' never invokes the mock assertion"
+            )
+
+if issues:
+    for item in issues:
+        print(f"[FAIL] {item}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"[PASS] Python syntax & mock assertion checks clean: {path}")
 PY
 }
 
@@ -166,11 +237,16 @@ main() {
     usage
     exit 0
   fi
+  if [[ "$sub" == "-v" || "$sub" == "--version" ]]; then
+    echo "ai-verify-guards v${VERSION}"
+    exit 0
+  fi
   shift
 
   case "$sub" in
     script)     cmd_script "$@" ;;
     json)       cmd_json "$@" ;;
+    py-test)    cmd_py_test "$@" ;;
     diff-dirs)  cmd_diff_dirs "$@" ;;
     regex)      cmd_regex "$@" ;;
     run-strict) cmd_run_strict "$@" ;;
